@@ -720,7 +720,7 @@ img{display:block;}
             <div><div class="set-row-l">Sürüm</div><div class="set-row-s">Noxipy Pro v6.0</div></div>
           </div>
           <div class="set-row">
-            <div><div class="set-row-l">Backend</div><div class="set-row-s">myt-backend-2se1.onrender.com</div></div>
+            <div><div class="set-row-l">Backend</div><div class="set-row-s" id="backend-host">Algılanıyor...</div></div>
             <button class="abtn" onclick="checkServer()">Yenile</button>
           </div>
           <div class="set-row">
@@ -946,8 +946,11 @@ img{display:block;}
 /* ═══════════════════════════════════════════════
    STATE
 ═══════════════════════════════════════════════ */
-const API = 'https://myt-backend-2se1.onrender.com';
+const API = /^https?:\/\//.test(window.location.origin)
+  ? window.location.origin
+  : 'https://myt-backend-ten.vercel.app';
 const aud = document.getElementById('aud');
+document.getElementById('backend-host').textContent = new URL(API).host;
 
 let queue = [], qIdx = -1, cur = null;
 let playing = false, shuf = false, rep = 0, vol = 0.8, muteVol = 0.8;
@@ -958,6 +961,8 @@ let dlCtrl = null;
 let ctxTrack = null;
 let radioActive = false, radioQuery = '';
 let currentEqPreset = 'normal';
+let fallbackBusy = false;
+const blockedVideoIds = new Set();
 
 /* — Playlists — */
 let playlists = JSON.parse(localStorage.getItem('nxPlaylists') || '[]');
@@ -1017,8 +1022,15 @@ function onYouTubeIframeAPIReady() {
   ytInitDone = true;
   ytPlayer = new YT.Player('yt-iframe', {
     height:'100%', width:'100%', videoId:'',
-    playerVars:{ playsinline:1, controls:1, rel:0, modestbranding:1, iv_load_policy:3 },
-    events:{ onReady(){ ytReady = true; }, onStateChange: onYtState }
+    playerVars:{ playsinline:1, controls:1, rel:0, modestbranding:1, iv_load_policy:3, origin: window.location.origin },
+    events:{
+      onReady(event){
+        ytReady = true;
+        try { event.target.setVolume(Math.round(vol * 100)); } catch (_) {}
+      },
+      onStateChange: onYtState,
+      onError: onYtError
+    }
   });
 }
 
@@ -1040,6 +1052,57 @@ function onYtState(e) {
   if (e.data === S.ENDED)     { playing=false; setPlayIco(false); showEq(false); stopArtSpin(); handleEnd(); }
   if (e.data === S.BUFFERING) showNotif('⏳ Yükleniyor...');
   updateMediaSession();
+}
+
+function isRecoverableYtError(code) {
+  return [2, 5, 100, 101, 150].includes(code);
+}
+
+async function tryPlayableFallback() {
+  if (!cur || fallbackBusy) return;
+  fallbackBusy = true;
+  blockedVideoIds.add(cur.id);
+
+  try {
+    showNotif('⚠️ Bu video açılamadı, alternatif aranıyor...');
+    const query = `${cur.title} audio`;
+    const resp = await fetch(`${API}/search?q=${encodeURIComponent(query)}`, {
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!resp.ok) throw new Error('Alternatif sonuç alınamadı');
+
+    const data = await resp.json();
+    const alt = data.find(v => v.id && !blockedVideoIds.has(v.id) && v.id !== cur.id);
+    if (!alt) {
+      showNotif('⚠️ Bu şarkı için çalınabilir alternatif bulunamadı');
+      return;
+    }
+
+    showNotif('▶ Alternatif sürüm açılıyor...');
+    playById(alt.id, alt.title, alt.thumbnail || cur.thumbnail || '', alt.duration || cur.duration || '');
+  } catch (error) {
+    console.warn('YT fallback error:', error);
+    showNotif('❌ Şarkı açılamadı, farklı bir sonuç deneyin');
+  } finally {
+    fallbackBusy = false;
+  }
+}
+
+function onYtError(e) {
+  const code = Number(e?.data);
+  console.warn('YouTube player error:', code, cur?.id);
+  playing = false;
+  setPlayIco(false);
+  showEq(false);
+  stopArtSpin();
+  updateMediaSession();
+
+  if (isRecoverableYtError(code)) {
+    tryPlayableFallback();
+    return;
+  }
+
+  showNotif(`❌ Oynatma hatası (${code || 'bilinmiyor'})`);
 }
 
 /* ═══════════════════════════════════════════════
@@ -1149,7 +1212,7 @@ async function checkServer() {
     }
   }
   setSrv('err','❌ Sunucu yanıt vermiyor');
-  showNotif('⚠️ Backend bağlanamadı. Render uyuyor olabilir, birkaç dk bekle.');
+  showNotif('⚠️ Backend bağlanamadı. Bağlantıyı kontrol edip tekrar deneyin.');
 }
 const setSrv = (cls,txt) => { document.getElementById('sdot').className=cls; document.getElementById('stxt').textContent=txt; };
 const sleep  = ms => new Promise(r => setTimeout(r,ms));
@@ -1564,7 +1627,16 @@ function playYT(id, title, thumbnail) {
     setTimeout(() => playYT(id, title, thumbnail), 800);
     return;
   }
-  ytPlayer.loadVideoById(id);
+  aud.pause();
+  ytPlayer.loadVideoById({ videoId: id, startSeconds: 0 });
+  setTimeout(() => {
+    try { ytPlayer.playVideo(); } catch (_) {}
+  }, 180);
+  setTimeout(() => {
+    try {
+      if (ytPlayer.getPlayerState?.() !== YT.PlayerState.PLAYING) ytPlayer.playVideo();
+    } catch (_) {}
+  }, 1200);
   playing=true; setPlayIco(true); startArtSpin();
 
   document.getElementById('fpT').textContent = title;
