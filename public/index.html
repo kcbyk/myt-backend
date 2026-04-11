@@ -968,6 +968,7 @@ let serverOk = false, sleepTmr = null;
 let blobUrl = null;
 let ytPlayer = null, ytReady = false, ytInitDone = false;
 let dlCtrl = null;
+let dlCanceled = false;
 let ctxTrack = null;
 let radioActive = false, radioQuery = '';
 let currentEqPreset = 'normal';
@@ -2116,17 +2117,17 @@ async function dlById(id, title) {
   const btn = document.getElementById('dl-'+id);
   if (btn) btn.disabled=true;
   dlCtrl = new AbortController();
+  dlCanceled = false;
   showDl(`⬇ ${title}`, -1);
   showNotif('⬇ İndirme hazırlanıyor...');
 
-  const backendOk = await tryBackendDl(id, title);
-  if (!backendOk) {
-    const cobaltOk = await tryCobaltDl(id, title);
-    if (!cobaltOk) {
-      hideDl();
-      showNotif('⬇ YouTube sayfası açılıyor...');
-      window.open(`https://www.youtube.com/watch?v=${id}`, '_blank');
-    }
+  const backendState = await tryBackendDl(id, title);
+  if (backendState === 'aborted') {
+    hideDl();
+  } else if (!backendState) {
+    hideDl();
+    showNotif('⬇ Direkt indirme açılıyor...');
+    openBackendDownload(id);
   }
 
   dlCtrl = null;
@@ -2135,11 +2136,19 @@ async function dlById(id, title) {
 
 async function tryBackendDl(id, title) {
   if (!serverOk) return false;
+  let connectTimer = null;
+  let didTimeOut = false;
   try {
+    connectTimer = setTimeout(() => {
+      didTimeOut = true;
+      dlCtrl?.abort();
+    }, 15000);
+
     const resp = await fetch(`${API}/process?id=${id}`, {
       headers: {'Accept':'audio/mpeg,audio/*,*/*'},
-      signal: AbortSignal.timeout(20000)
+      signal: dlCtrl.signal
     });
+    clearTimeout(connectTimer);
     if (!resp.ok) return false;
     const contentType = resp.headers.get('Content-Type')||'';
     if (!contentType.includes('audio') && !contentType.includes('octet')) return false;
@@ -2157,38 +2166,22 @@ async function tryBackendDl(id, title) {
     hideDl(); showNotif('✅ İndirildi: '+title);
     totalDls++; localStorage.setItem('nxDls',totalDls); updateStats();
     return true;
-  } catch(e) { return false; }
+  } catch(e) {
+    clearTimeout(connectTimer);
+    if (dlCanceled) return 'aborted';
+    if (didTimeOut) return false;
+    return false;
+  }
 }
 
-async function tryCobaltDl(id, title) {
-  try {
-    showDl(`⬇ Cobalt ile deneniyor...`, -1);
-    const resp = await fetch('https://api.cobalt.tools/', {
-      method: 'POST',
-      headers: { 'Content-Type':'application/json', 'Accept':'application/json' },
-      body: JSON.stringify({
-        url: `https://www.youtube.com/watch?v=${id}`,
-        downloadMode: 'audio',
-        audioFormat: 'mp3',
-        audioBitrate: '320'
-      }),
-      signal: AbortSignal.timeout(15000)
-    });
-    if (!resp.ok) return false;
-    const data = await resp.json();
-    if (data.status === 'tunnel' || data.status === 'redirect') {
-      const url = data.url;
-      showDl(`⬇ ${title}`, -1);
-      const fileResp = await fetch(url, { signal: AbortSignal.timeout(60000) });
-      if (!fileResp.ok) return false;
-      const arrBuf = await fileResp.arrayBuffer();
-      saveDlBlob([new Uint8Array(arrBuf)], title, 'audio/mpeg');
-      hideDl(); showNotif('✅ İndirildi: '+title);
-      totalDls++; localStorage.setItem('nxDls',totalDls); updateStats();
-      return true;
-    }
-    return false;
-  } catch(e) { return false; }
+function openBackendDownload(id) {
+  const a = Object.assign(document.createElement('a'), {
+    href: `${API}/process?id=${encodeURIComponent(id)}`,
+    rel: 'noopener'
+  });
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 }
 
 function saveDlBlob(chunks, title, mime) {
@@ -2200,7 +2193,7 @@ function saveDlBlob(chunks, title, mime) {
   setTimeout(()=>URL.revokeObjectURL(url), 8000);
 }
 
-function cancelDl() { dlCtrl?.abort(); hideDl(); }
+function cancelDl() { dlCanceled = true; dlCtrl?.abort(); hideDl(); showNotif('⛔ İndirme iptal edildi'); }
 function dlCur() { if(!cur){showNotif('⚠️ Önce şarkı seç');return;} dlById(cur.id,cur.title); }
 function showDl(txt,pct) {
   document.getElementById('dl-wrap').classList.add('v');

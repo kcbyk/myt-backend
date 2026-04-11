@@ -1,86 +1,280 @@
 const express = require('express');
 const path = require('path');
+const os = require('os');
+const fs = require('fs/promises');
+const { spawn } = require('child_process');
 const cors = require('cors');
-const ytdl = require('ytdl-core');
 const ytSearch = require('yt-search');
-const ffmpeg = require('fluent-ffmpeg');
-
-// Bulut sunucularda FFmpeg'in sorunsuz çalışması için otomatik yükleyici
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
-ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
+
+const YT_DLP_URL =
+  process.platform === 'win32'
+    ? 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+    : 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
+const YT_DLP_PATH = path.join(os.tmpdir(), process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+
+let ytDlpReadyPromise = null;
+
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// 1. UYKU MODU ENGELLEYİCİ (Ping Rotası)
-// UptimeRobot buraya her 10 dakikada bir istek atıp sunucuyu uyanık tutacak.
 app.get('/ping', (req, res) => {
-    res.status(200).send('Sunucu ayakta ve çalışıyor!');
+  res.status(200).send('Sunucu ayakta ve calisiyor!');
 });
 
-// 2. ARAMA MOTORU ROTASI
-// Ön yüzden gelen kelimeyi aratıp JSON olarak başlık ve ID döndürür.
 app.get('/search', async (req, res) => {
-    try {
-        const query = req.query.q;
-        if (!query) return res.status(400).json({ error: "Lütfen bir arama kelimesi girin." });
-
-        const searchResults = await ytSearch(query);
-        const videos = searchResults.videos.slice(0, 10).map(v => ({
-            id: v.videoId,
-            title: v.title,
-            thumbnail: v.thumbnail,
-            duration: v.timestamp
-        }));
-
-        res.json(videos);
-    } catch (error) {
-        console.error("Arama Hatası:", error);
-        res.status(500).json({ error: "Arama sırasında bir hata oluştu." });
+  try {
+    const query = req.query.q;
+    if (!query) {
+      return res.status(400).json({ error: 'Lutfen bir arama kelimesi girin.' });
     }
+
+    const searchResults = await ytSearch(query);
+    const videos = searchResults.videos.slice(0, 10).map((video) => ({
+      id: video.videoId,
+      title: video.title,
+      thumbnail: video.thumbnail,
+      duration: video.timestamp,
+    }));
+
+    res.json(videos);
+  } catch (error) {
+    console.error('Arama hatasi:', error);
+    res.status(500).json({ error: 'Arama sirasinda bir hata olustu.' });
+  }
 });
 
-// 3. DÖNÜŞTÜRME VE İNDİRME ROTASI (Asıl Büyü)
-// Verilen ID'yi alır, sadece sesini çeker, MP3'e çevirir ve telefona yollar.
 app.get('/process', async (req, res) => {
-    try {
-        const videoId = req.query.id;
-        if (!videoId) return res.status(400).json({ error: "Video ID gerekli." });
+  const videoId = String(req.query.id || '').trim();
+  if (!isValidVideoId(videoId)) {
+    return res.status(400).json({ error: 'Gecerli bir video ID gerekli.' });
+  }
 
-        const url = `https://www.youtube.com/watch?v=${videoId}`;
-        
-        // Videonun bilgilerini al (Dosya adını belirlemek için)
-        const info = await ytdl.getInfo(videoId);
-        const title = info.videoDetails.title.replace(/[^\w\s]/gi, ''); // Özel karakterleri temizle
+  let ffmpegProcess = null;
 
-        res.header('Content-Disposition', `attachment; filename="${title}.mp3"`);
-        res.header('Content-Type', 'audio/mpeg');
-
-        // ytdl-core ile sadece sesi çek
-        const stream = ytdl(url, { quality: 'highestaudio' });
-
-        // FFmpeg ile sesi anında 320kbps MP3'e çevir ve istemciye (telefona) aktar
-        ffmpeg(stream)
-            .audioBitrate(320)
-            .format('mp3')
-            .on('error', (err) => {
-                console.error('Dönüştürme Hatası:', err);
-            })
-            .pipe(res);
-
-    } catch (error) {
-        console.error("İşlem Hatası:", error);
-        if (!res.headersSent) res.status(500).json({ error: "İndirme sırasında bir hata oluştu." });
+  const abortWork = () => {
+    if (ffmpegProcess && !ffmpegProcess.killed) {
+      ffmpegProcess.kill();
     }
+  };
+
+  req.on('close', abortWork);
+  res.on('close', abortWork);
+
+  try {
+    const { title, mediaUrl } = await getAudioSource(videoId);
+    const fileName = sanitizeFileName(title);
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Disposition', buildContentDisposition(fileName));
+    res.setHeader('Cache-Control', 'no-store');
+
+    ffmpegProcess = spawn(
+      ffmpegPath,
+      [
+        '-v',
+        'error',
+        '-i',
+        mediaUrl,
+        '-vn',
+        '-c:a',
+        'libmp3lame',
+        '-b:a',
+        '192k',
+        '-f',
+        'mp3',
+        'pipe:1',
+      ],
+      { windowsHide: true }
+    );
+
+    let ffmpegError = '';
+
+    ffmpegProcess.stderr.setEncoding('utf8');
+    ffmpegProcess.stderr.on('data', (chunk) => {
+      ffmpegError += chunk;
+    });
+
+    ffmpegProcess.on('error', (error) => {
+      console.error('FFmpeg baslatma hatasi:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'MP3 donusturme baslatilamadi.' });
+      } else {
+        res.destroy(error);
+      }
+    });
+
+    ffmpegProcess.on('close', (code) => {
+      if (code === 0 || res.writableEnded) {
+        return;
+      }
+
+      const message = ffmpegError.trim() || `FFmpeg cikis kodu ${code}`;
+      console.error('FFmpeg donusturme hatasi:', message);
+
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'MP3 donusturme basarisiz oldu.' });
+      } else {
+        res.destroy(new Error(message));
+      }
+    });
+
+    ffmpegProcess.stdout.pipe(res);
+  } catch (error) {
+    console.error('Indirme hatasi:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Indirme sirasinda bir hata olustu.' });
+    }
+  }
 });
+
+function isValidVideoId(value) {
+  return /^[A-Za-z0-9_-]{11}$/.test(value);
+}
+
+function sanitizeFileName(value) {
+  return (
+    (value || 'muzik')
+      .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 120) || 'muzik'
+  );
+}
+
+function buildContentDisposition(fileName) {
+  const asciiFallback = (fileName.replace(/[^\x20-\x7E]/g, '').replace(/["\\]/g, '').trim() || 'muzik') + '.mp3';
+  const utfName = `${encodeURIComponent(fileName)}.mp3`;
+  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${utfName}`;
+}
+
+async function ensureYtDlpBinary() {
+  try {
+    const stat = await fs.stat(YT_DLP_PATH);
+    if (stat.size > 0) {
+      return YT_DLP_PATH;
+    }
+  } catch (_) {
+    // Missing binary is handled below.
+  }
+
+  if (!ytDlpReadyPromise) {
+    ytDlpReadyPromise = (async () => {
+      const response = await fetch(YT_DLP_URL, {
+        redirect: 'follow',
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+
+      if (!response.ok) {
+        throw new Error(`yt-dlp indirilemedi: HTTP ${response.status}`);
+      }
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      await fs.writeFile(YT_DLP_PATH, buffer);
+
+      if (process.platform !== 'win32') {
+        await fs.chmod(YT_DLP_PATH, 0o755);
+      }
+
+      return YT_DLP_PATH;
+    })().catch(async (error) => {
+      ytDlpReadyPromise = null;
+      try {
+        await fs.unlink(YT_DLP_PATH);
+      } catch (_) {
+        // Ignore cleanup errors.
+      }
+      throw error;
+    });
+  }
+
+  return ytDlpReadyPromise;
+}
+
+function runCommand(binaryPath, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binaryPath, args, { windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error('Komut zaman asimina ugradi.'));
+    }, timeoutMs);
+
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        reject(new Error(stderr.trim() || `Komut cikis kodu ${code}`));
+      }
+    });
+  });
+}
+
+async function getAudioSource(videoId) {
+  const ytDlpPath = await ensureYtDlpBinary();
+  const targetUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+  const { stdout } = await runCommand(
+    ytDlpPath,
+    [
+      '-f',
+      'bestaudio/best',
+      '--no-playlist',
+      '--no-warnings',
+      '--print',
+      'title',
+      '--get-url',
+      targetUrl,
+    ],
+    30000
+  );
+
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length < 2) {
+    throw new Error('Ses kaynagi bulunamadi.');
+  }
+
+  const title = sanitizeFileName(lines[0]);
+  const mediaUrl = lines[lines.length - 1];
+
+  if (!/^https?:\/\//.test(mediaUrl)) {
+    throw new Error('Gecerli bir medya baglantisi bulunamadi.');
+  }
+
+  return { title, mediaUrl };
+}
 
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-    console.log(`Motor çalıştı! Sunucu ${PORT} portunda dinleniyor.`);
+  console.log(`Motor calisti! Sunucu ${PORT} portunda dinleniyor.`);
 });
-        
