@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const cors = require('cors');
 const ytdl = require('ytdl-core');
 const ytSearch = require('yt-search');
@@ -10,6 +11,11 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
 app.use(cors());
+app.use(express.static(path.join(__dirname, 'public')));
+
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // 1. UYKU MODU ENGELLEYİCİ (Ping Rotası)
 // UptimeRobot buraya her 10 dakikada bir istek atıp sunucuyu uyanık tutacak.
