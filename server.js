@@ -17,6 +17,13 @@ const YT_DLP_PATH = path.join(os.tmpdir(), process.platform === 'win32' ? 'yt-dl
 
 let ytDlpReadyPromise = null;
 
+function getErrorDetails(error) {
+  if (!error) {
+    return 'Bilinmeyen hata';
+  }
+  return error.stack || error.message || String(error);
+}
+
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -106,7 +113,7 @@ app.get('/process', async (req, res) => {
       console.error('FFmpeg baslatma hatasi:', error);
       if (!res.headersSent) {
         const payload = { error: 'MP3 donusturme baslatilamadi.' };
-        if (debugMode) payload.details = error.message;
+        if (debugMode) payload.details = getErrorDetails(error);
         res.status(500).json(payload);
       } else {
         res.destroy(error);
@@ -135,7 +142,7 @@ app.get('/process', async (req, res) => {
     console.error('Indirme hatasi:', error);
     if (!res.headersSent) {
       const payload = { error: 'Indirme sirasinda bir hata olustu.' };
-      if (debugMode) payload.details = error.message;
+      if (debugMode) payload.details = getErrorDetails(error);
       res.status(500).json(payload);
     }
   }
