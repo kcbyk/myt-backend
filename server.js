@@ -9,11 +9,14 @@ const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 
 const app = express();
 
-const YT_DLP_URL =
+const YT_DLP_ASSET =
   process.platform === 'win32'
-    ? 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
-    : 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
-const YT_DLP_PATH = path.join(os.tmpdir(), process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+    ? 'yt-dlp.exe'
+    : process.platform === 'darwin'
+      ? 'yt-dlp_macos'
+      : 'yt-dlp_linux';
+const YT_DLP_URL = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${YT_DLP_ASSET}`;
+const YT_DLP_PATH = path.join(os.tmpdir(), YT_DLP_ASSET);
 
 let ytDlpReadyPromise = null;
 
