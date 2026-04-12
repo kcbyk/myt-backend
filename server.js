@@ -20,13 +20,6 @@ const YT_DLP_PATH = path.join(os.tmpdir(), YT_DLP_ASSET);
 
 let ytDlpReadyPromise = null;
 
-function getErrorDetails(error) {
-  if (!error) {
-    return 'Bilinmeyen hata';
-  }
-  return error.stack || error.message || String(error);
-}
-
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -62,7 +55,6 @@ app.get('/search', async (req, res) => {
 
 app.get('/process', async (req, res) => {
   const videoId = String(req.query.id || '').trim();
-  const debugMode = req.query.debug === '1';
   if (!isValidVideoId(videoId)) {
     return res.status(400).json({ error: 'Gecerli bir video ID gerekli.' });
   }
@@ -115,9 +107,7 @@ app.get('/process', async (req, res) => {
     ffmpegProcess.on('error', (error) => {
       console.error('FFmpeg baslatma hatasi:', error);
       if (!res.headersSent) {
-        const payload = { error: 'MP3 donusturme baslatilamadi.' };
-        if (debugMode) payload.details = getErrorDetails(error);
-        res.status(500).json(payload);
+        res.status(500).json({ error: 'MP3 donusturme baslatilamadi.' });
       } else {
         res.destroy(error);
       }
@@ -132,9 +122,7 @@ app.get('/process', async (req, res) => {
       console.error('FFmpeg donusturme hatasi:', message);
 
       if (!res.headersSent) {
-        const payload = { error: 'MP3 donusturme basarisiz oldu.' };
-        if (debugMode) payload.details = message;
-        res.status(500).json(payload);
+        res.status(500).json({ error: 'MP3 donusturme basarisiz oldu.' });
       } else {
         res.destroy(new Error(message));
       }
@@ -144,9 +132,7 @@ app.get('/process', async (req, res) => {
   } catch (error) {
     console.error('Indirme hatasi:', error);
     if (!res.headersSent) {
-      const payload = { error: 'Indirme sirasinda bir hata olustu.' };
-      if (debugMode) payload.details = getErrorDetails(error);
-      res.status(500).json(payload);
+      res.status(500).json({ error: 'Indirme sirasinda bir hata olustu.' });
     }
   }
 });
