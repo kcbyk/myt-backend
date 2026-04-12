@@ -52,6 +52,7 @@ app.get('/search', async (req, res) => {
 
 app.get('/process', async (req, res) => {
   const videoId = String(req.query.id || '').trim();
+  const debugMode = req.query.debug === '1';
   if (!isValidVideoId(videoId)) {
     return res.status(400).json({ error: 'Gecerli bir video ID gerekli.' });
   }
@@ -104,7 +105,9 @@ app.get('/process', async (req, res) => {
     ffmpegProcess.on('error', (error) => {
       console.error('FFmpeg baslatma hatasi:', error);
       if (!res.headersSent) {
-        res.status(500).json({ error: 'MP3 donusturme baslatilamadi.' });
+        const payload = { error: 'MP3 donusturme baslatilamadi.' };
+        if (debugMode) payload.details = error.message;
+        res.status(500).json(payload);
       } else {
         res.destroy(error);
       }
@@ -119,7 +122,9 @@ app.get('/process', async (req, res) => {
       console.error('FFmpeg donusturme hatasi:', message);
 
       if (!res.headersSent) {
-        res.status(500).json({ error: 'MP3 donusturme basarisiz oldu.' });
+        const payload = { error: 'MP3 donusturme basarisiz oldu.' };
+        if (debugMode) payload.details = message;
+        res.status(500).json(payload);
       } else {
         res.destroy(new Error(message));
       }
@@ -129,7 +134,9 @@ app.get('/process', async (req, res) => {
   } catch (error) {
     console.error('Indirme hatasi:', error);
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Indirme sirasinda bir hata olustu.' });
+      const payload = { error: 'Indirme sirasinda bir hata olustu.' };
+      if (debugMode) payload.details = error.message;
+      res.status(500).json(payload);
     }
   }
 });
