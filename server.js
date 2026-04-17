@@ -75,6 +75,7 @@ app.get('/lyrics', async (req, res) => {
 app.get('/process', async (req, res) => {
   const videoId = String(req.query.id || '').trim();
   const forceDownload = req.query.dl === '1' || req.query.download === '1';
+  const debugMode = req.query.debug === '1';
   if (!isValidVideoId(videoId)) {
     return res.status(400).json({ error: 'Gecerli bir video ID gerekli.' });
   }
@@ -83,6 +84,7 @@ app.get('/process', async (req, res) => {
   let ffmpegProcess = null;
   let requestAborted = false;
   let responseFinished = false;
+  let streamStarted = false;
 
   const abortWork = () => {
     if (ytDlpProcess && !ytDlpProcess.killed) {
@@ -103,7 +105,11 @@ app.get('/process', async (req, res) => {
     abortWork();
 
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Indirme sirasinda bir hata olustu.' });
+      const payload = { error: 'Indirme sirasinda bir hata olustu.' };
+      if (debugMode) {
+        payload.details = error && error.message ? error.message : String(error);
+      }
+      res.status(500).json(payload);
     } else if (!res.writableEnded) {
       res.destroy(new Error('Indirme sirasinda bir hata olustu.'));
     }
@@ -127,10 +133,17 @@ app.get('/process', async (req, res) => {
     const title = await getVideoTitle(ytDlpPath, targetUrl);
     const fileName = sanitizeFileName(title);
 
-    res.setHeader('Content-Type', forceDownload ? 'application/octet-stream' : 'audio/mpeg');
-    res.setHeader('Content-Disposition', buildContentDisposition(fileName));
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
+    const startResponseStream = () => {
+      if (streamStarted) {
+        return;
+      }
+
+      streamStarted = true;
+      res.setHeader('Content-Type', forceDownload ? 'application/octet-stream' : 'audio/mpeg');
+      res.setHeader('Content-Disposition', buildContentDisposition(fileName));
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+    };
 
     ytDlpProcess = spawn(
       ytDlpPath,
@@ -203,6 +216,9 @@ app.get('/process', async (req, res) => {
     ffmpegProcess.on('close', (code) => {
       if (code === 0 || res.writableEnded || responseFinished || requestAborted) {
         responseFinished = true;
+        if (streamStarted && !res.writableEnded) {
+          res.end();
+        }
         return;
       }
 
@@ -210,7 +226,15 @@ app.get('/process', async (req, res) => {
       failResponse(new Error(message));
     });
 
-    ffmpegProcess.stdout.pipe(res);
+    ffmpegProcess.stdout.once('data', (chunk) => {
+      if (requestAborted || responseFinished) {
+        return;
+      }
+
+      startResponseStream();
+      res.write(chunk);
+      ffmpegProcess.stdout.pipe(res);
+    });
   } catch (error) {
     failResponse(error);
   }
