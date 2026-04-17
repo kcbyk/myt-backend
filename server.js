@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs/promises');
 const { spawn } = require('child_process');
+const { pipeline } = require('stream');
 const cors = require('cors');
 const ytSearch = require('yt-search');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
@@ -149,7 +150,7 @@ app.get('/process', async (req, res) => {
       ytDlpPath,
       [
         '-f',
-        'bestaudio/best',
+        'bestaudio[ext=m4a]/bestaudio/best',
         '--no-playlist',
         '--no-warnings',
         '--geo-bypass',
@@ -202,7 +203,22 @@ app.get('/process', async (req, res) => {
       failResponse(error);
     });
 
-    ytDlpProcess.stdout.pipe(ffmpegProcess.stdin);
+    ffmpegProcess.stdin.on('error', (error) => {
+      if (error && error.code === 'EPIPE') {
+        return;
+      }
+      failResponse(error);
+    });
+
+    pipeline(ytDlpProcess.stdout, ffmpegProcess.stdin, (error) => {
+      if (!error || requestAborted || responseFinished) {
+        return;
+      }
+      if (error.code === 'EPIPE') {
+        return;
+      }
+      failResponse(error);
+    });
 
     ytDlpProcess.on('close', (code) => {
       if (code === 0 || responseFinished || requestAborted) {
