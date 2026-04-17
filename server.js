@@ -24,6 +24,7 @@ const INVIDIOUS_INSTANCES = [
   'invidious.flokinet.to',
   'invidious.jing.rocks',
 ];
+const INVIDIOUS_LIST_URL = 'https://api.invidious.io/instances.json?pretty=0&sort_by=health';
 
 let ytDlpReadyPromise = null;
 
@@ -445,28 +446,63 @@ function pickBestInvidiousAudioFormat(formats) {
   );
 }
 
+function uniqueStrings(values) {
+  return [...new Set(values.filter(Boolean).map((item) => String(item).trim()))];
+}
+
+async function getCandidateInvidiousInstances() {
+  const candidates = [...INVIDIOUS_INSTANCES];
+  try {
+    const list = await fetchJsonWithTimeout(INVIDIOUS_LIST_URL, 12000, { 'User-Agent': 'Mozilla/5.0' });
+    if (Array.isArray(list)) {
+      for (const entry of list) {
+        if (!Array.isArray(entry) || entry.length < 2) {
+          continue;
+        }
+        const host = entry[0];
+        const meta = entry[1];
+        if (!host || !meta || meta.api !== true) {
+          continue;
+        }
+        candidates.push(String(host));
+        if (candidates.length >= 30) {
+          break;
+        }
+      }
+    }
+  } catch (_) {
+    // Keep static list if API is not reachable.
+  }
+  return uniqueStrings(candidates);
+}
+
 async function getInvidiousAudioSource(videoId) {
-  for (const instance of INVIDIOUS_INSTANCES) {
-    try {
-      const data = await fetchJsonWithTimeout(`https://${instance}/api/v1/videos/${videoId}`, 12000, {
-        'User-Agent': 'Mozilla/5.0',
-      });
+  const instances = await getCandidateInvidiousInstances();
 
-      if (!data || !Array.isArray(data.adaptiveFormats)) {
-        continue;
+  for (const instance of instances) {
+    for (const scheme of ['https', 'http']) {
+      try {
+        const origin = `${scheme}://${instance}`;
+        const data = await fetchJsonWithTimeout(`${origin}/api/v1/videos/${videoId}`, 12000, {
+          'User-Agent': 'Mozilla/5.0',
+        });
+
+        if (!data || !Array.isArray(data.adaptiveFormats)) {
+          continue;
+        }
+
+        const format = pickBestInvidiousAudioFormat(data.adaptiveFormats);
+        if (!format || format.itag == null) {
+          continue;
+        }
+
+        return {
+          title: sanitizeFileName(data.title || 'muzik'),
+          mediaUrl: `${origin}/latest_version?id=${encodeURIComponent(videoId)}&itag=${encodeURIComponent(String(format.itag))}&local=true`,
+        };
+      } catch (_) {
+        // Try next scheme or instance.
       }
-
-      const format = pickBestInvidiousAudioFormat(data.adaptiveFormats);
-      if (!format || format.itag == null) {
-        continue;
-      }
-
-      return {
-        title: sanitizeFileName(data.title || 'muzik'),
-        mediaUrl: `https://${instance}/latest_version?id=${encodeURIComponent(videoId)}&itag=${encodeURIComponent(String(format.itag))}&local=true`,
-      };
-    } catch (_) {
-      // Try next instance.
     }
   }
 
