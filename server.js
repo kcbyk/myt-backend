@@ -3,7 +3,6 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs/promises');
 const { spawn } = require('child_process');
-const { pipeline } = require('stream');
 const cors = require('cors');
 const ytSearch = require('yt-search');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
@@ -18,6 +17,13 @@ const YT_DLP_ASSET =
       : 'yt-dlp_linux';
 const YT_DLP_URL = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${YT_DLP_ASSET}`;
 const YT_DLP_PATH = path.join(os.tmpdir(), YT_DLP_ASSET);
+const INVIDIOUS_INSTANCES = [
+  'inv.thepixora.com',
+  'inv.nadeko.net',
+  'invidious.privacyredirect.com',
+  'invidious.flokinet.to',
+  'invidious.jing.rocks',
+];
 
 let ytDlpReadyPromise = null;
 
@@ -81,16 +87,12 @@ app.get('/process', async (req, res) => {
     return res.status(400).json({ error: 'Gecerli bir video ID gerekli.' });
   }
 
-  let ytDlpProcess = null;
   let ffmpegProcess = null;
   let requestAborted = false;
   let responseFinished = false;
   let streamStarted = false;
 
   const abortWork = () => {
-    if (ytDlpProcess && !ytDlpProcess.killed) {
-      ytDlpProcess.kill();
-    }
     if (ffmpegProcess && !ffmpegProcess.killed) {
       ffmpegProcess.kill();
     }
@@ -129,9 +131,7 @@ app.get('/process', async (req, res) => {
   });
 
   try {
-    const ytDlpPath = await ensureYtDlpBinary();
-    const targetUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const title = await getVideoTitle(ytDlpPath, targetUrl);
+    const { title, mediaUrl } = await getAudioSource(videoId);
     const fileName = sanitizeFileName(title);
 
     const startResponseStream = () => {
@@ -146,30 +146,13 @@ app.get('/process', async (req, res) => {
       res.setHeader('X-Content-Type-Options', 'nosniff');
     };
 
-    ytDlpProcess = spawn(
-      ytDlpPath,
-      [
-        '-f',
-        'bestaudio[ext=m4a]/bestaudio/best',
-        '--no-playlist',
-        '--no-warnings',
-        '--geo-bypass',
-        '--extractor-args',
-        'youtube:player_client=android,web_creator,web_safari',
-        '-o',
-        '-',
-        targetUrl,
-      ],
-      { windowsHide: true }
-    );
-
     ffmpegProcess = spawn(
       ffmpegPath,
       [
         '-v',
         'error',
         '-i',
-        'pipe:0',
+        mediaUrl,
         '-vn',
         '-c:a',
         'libmp3lame',
@@ -182,51 +165,15 @@ app.get('/process', async (req, res) => {
       { windowsHide: true }
     );
 
-    let ytDlpError = '';
     let ffmpegError = '';
-
-    ytDlpProcess.stderr.setEncoding('utf8');
-    ytDlpProcess.stderr.on('data', (chunk) => {
-      ytDlpError += chunk;
-    });
 
     ffmpegProcess.stderr.setEncoding('utf8');
     ffmpegProcess.stderr.on('data', (chunk) => {
       ffmpegError += chunk;
     });
 
-    ytDlpProcess.on('error', (error) => {
-      failResponse(error);
-    });
-
     ffmpegProcess.on('error', (error) => {
       failResponse(error);
-    });
-
-    ffmpegProcess.stdin.on('error', (error) => {
-      if (error && error.code === 'EPIPE') {
-        return;
-      }
-      failResponse(error);
-    });
-
-    pipeline(ytDlpProcess.stdout, ffmpegProcess.stdin, (error) => {
-      if (!error || requestAborted || responseFinished) {
-        return;
-      }
-      if (error.code === 'EPIPE') {
-        return;
-      }
-      failResponse(error);
-    });
-
-    ytDlpProcess.on('close', (code) => {
-      if (code === 0 || responseFinished || requestAborted) {
-        return;
-      }
-
-      const message = ytDlpError.trim() || `yt-dlp cikis kodu ${code}`;
-      failResponse(new Error(message));
     });
 
     ffmpegProcess.on('close', (code) => {
@@ -238,7 +185,7 @@ app.get('/process', async (req, res) => {
         return;
       }
 
-      const message = ffmpegError.trim() || ytDlpError.trim() || `FFmpeg cikis kodu ${code}`;
+      const message = ffmpegError.trim() || `FFmpeg cikis kodu ${code}`;
       failResponse(new Error(message));
     });
 
@@ -471,26 +418,105 @@ function runCommand(binaryPath, args, timeoutMs) {
   });
 }
 
-async function getVideoTitle(ytDlpPath, targetUrl) {
-  const { stdout } = await runCommand(
-    ytDlpPath,
-    [
-      '--skip-download',
-      '--no-playlist',
-      '--no-warnings',
-      '--print',
-      'title',
-      targetUrl,
-    ],
-    45000
+function isBotVerificationError(error) {
+  const message = String(error && error.message ? error.message : error).toLowerCase();
+  return (
+    message.includes('not a bot') ||
+    message.includes('sign in to confirm') ||
+    message.includes('use --cookies') ||
+    message.includes('cookies-from-browser')
   );
+}
 
-  const title = stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean);
+function pickBestInvidiousAudioFormat(formats) {
+  if (!Array.isArray(formats)) {
+    return null;
+  }
 
-  return title || 'muzik';
+  const audioFormats = formats.filter((item) => String(item.type || '').startsWith('audio/'));
+  if (!audioFormats.length) {
+    return null;
+  }
+
+  return (
+    audioFormats.find((item) => Number(item.itag) === 140) ||
+    audioFormats.find((item) => String(item.type || '').includes('audio/mp4')) ||
+    audioFormats.slice().sort((a, b) => Number(b.bitrate || 0) - Number(a.bitrate || 0))[0]
+  );
+}
+
+async function getInvidiousAudioSource(videoId) {
+  for (const instance of INVIDIOUS_INSTANCES) {
+    try {
+      const data = await fetchJsonWithTimeout(`https://${instance}/api/v1/videos/${videoId}`, 12000, {
+        'User-Agent': 'Mozilla/5.0',
+      });
+
+      if (!data || !Array.isArray(data.adaptiveFormats)) {
+        continue;
+      }
+
+      const format = pickBestInvidiousAudioFormat(data.adaptiveFormats);
+      if (!format || format.itag == null) {
+        continue;
+      }
+
+      return {
+        title: sanitizeFileName(data.title || 'muzik'),
+        mediaUrl: `https://${instance}/latest_version?id=${encodeURIComponent(videoId)}&itag=${encodeURIComponent(String(format.itag))}&local=true`,
+      };
+    } catch (_) {
+      // Try next instance.
+    }
+  }
+
+  throw new Error('Alternatif ses kaynagi bulunamadi.');
+}
+
+async function getAudioSource(videoId) {
+  const ytDlpPath = await ensureYtDlpBinary();
+  const targetUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+  try {
+    const { stdout } = await runCommand(
+      ytDlpPath,
+      [
+        '-f',
+        'bestaudio[ext=m4a]/bestaudio/best',
+        '--no-playlist',
+        '--no-warnings',
+        '--geo-bypass',
+        '--extractor-args',
+        'youtube:player_client=android,web_creator,web_safari',
+        '--print',
+        'title',
+        '--get-url',
+        targetUrl,
+      ],
+      50000
+    );
+
+    const lines = stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const mediaUrl = lines.slice().reverse().find((line) => /^https?:\/\//i.test(line));
+    const title = lines.find((line) => !/^https?:\/\//i.test(line)) || 'muzik';
+
+    if (!mediaUrl) {
+      throw new Error('Gecerli bir medya baglantisi bulunamadi.');
+    }
+
+    return { title: sanitizeFileName(title), mediaUrl };
+  } catch (error) {
+    if (!isBotVerificationError(error)) {
+      throw error;
+    }
+
+    console.warn('yt-dlp bot kontrolune takildi, Invidious fallback kullaniliyor.');
+    return getInvidiousAudioSource(videoId);
+  }
 }
 
 const PORT = process.env.PORT || 3000;
