@@ -478,21 +478,49 @@ async function getCandidateInvidiousInstances() {
 
 async function getInvidiousAudioSource(videoId) {
   const instances = await getCandidateInvidiousInstances();
+  let loggedAttempts = 0;
 
   for (const instance of instances) {
     for (const scheme of ['https', 'http']) {
       try {
         const origin = `${scheme}://${instance}`;
-        const data = await fetchJsonWithTimeout(`${origin}/api/v1/videos/${videoId}`, 12000, {
-          'User-Agent': 'Mozilla/5.0',
-        });
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 12000);
+        let response;
+        try {
+          response = await fetch(`${origin}/api/v1/videos/${videoId}`, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: controller.signal,
+            redirect: 'follow',
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+
+        if (!response.ok) {
+          if (loggedAttempts < 8) {
+            console.warn(`Invidious deneme basarisiz (${origin}): HTTP ${response.status}`);
+            loggedAttempts += 1;
+          }
+          continue;
+        }
+
+        const data = await response.json();
 
         if (!data || !Array.isArray(data.adaptiveFormats)) {
+          if (loggedAttempts < 8) {
+            console.warn(`Invidious deneme basarisiz (${origin}): adaptiveFormats yok`);
+            loggedAttempts += 1;
+          }
           continue;
         }
 
         const format = pickBestInvidiousAudioFormat(data.adaptiveFormats);
         if (!format || format.itag == null) {
+          if (loggedAttempts < 8) {
+            console.warn(`Invidious deneme basarisiz (${origin}): ses formati yok`);
+            loggedAttempts += 1;
+          }
           continue;
         }
 
@@ -500,8 +528,12 @@ async function getInvidiousAudioSource(videoId) {
           title: sanitizeFileName(data.title || 'muzik'),
           mediaUrl: `${origin}/latest_version?id=${encodeURIComponent(videoId)}&itag=${encodeURIComponent(String(format.itag))}&local=true`,
         };
-      } catch (_) {
-        // Try next scheme or instance.
+      } catch (error) {
+        if (loggedAttempts < 8) {
+          const message = error && error.message ? error.message : String(error);
+          console.warn(`Invidious deneme hatasi (${scheme}://${instance}): ${message}`);
+          loggedAttempts += 1;
+        }
       }
     }
   }
