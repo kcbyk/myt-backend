@@ -2782,6 +2782,195 @@ async function shareTrackById(id, title) {
   showNotif('↗ Link açıldı');
 }
 
+// Playback & download hardening overrides
+function isIOSDevice() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+function ensureClipFullscreenButton() {
+  const hdr = document.querySelector('.fp-hdr');
+  if (!hdr || document.getElementById('fpFsBtn')) return;
+  const likeBtn = document.getElementById('fpLikeB');
+  const btn = document.createElement('button');
+  btn.id = 'fpFsBtn';
+  btn.className = 'fp-btn';
+  btn.title = 'Tam Ekran';
+  btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>`;
+  btn.onclick = openClipFullscreen;
+  if (likeBtn && likeBtn.parentElement === hdr) hdr.insertBefore(btn, likeBtn);
+  else hdr.appendChild(btn);
+}
+
+function openClipFullscreen() {
+  const frame = document.getElementById('yt-iframe');
+  const container = document.querySelector('.fp-vid');
+  const candidates = [frame, container].filter(Boolean);
+  for (const el of candidates) {
+    const req = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+    if (typeof req === 'function') {
+      try { req.call(el); return; } catch (_) {}
+    }
+  }
+  if (cur?.id) {
+    window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(cur.id)}`, '_blank', 'noopener,noreferrer');
+    showNotif('↗ Tam ekran YouTube’da açıldı');
+  }
+}
+
+function onYouTubeIframeAPIReady() {
+  if (ytInitDone) return;
+  ytInitDone = true;
+  mountYtSurface('yt-host');
+  ytPlayer = new YT.Player('yt-iframe', {
+    height: '100%',
+    width: '100%',
+    videoId: '',
+    host: 'https://www.youtube.com',
+    playerVars: {
+      playsinline: 1,
+      controls: 1,
+      rel: 0,
+      modestbranding: 1,
+      iv_load_policy: 3,
+      autoplay: 1,
+      enablejsapi: 1,
+      fs: 1,
+      origin: window.location.origin
+    },
+    events: {
+      onReady(event) {
+        ytReady = true;
+        try {
+          event.target.unMute?.();
+          event.target.setVolume(Math.round(vol * 100));
+        } catch (_) {}
+        syncYtSurface();
+      },
+      onStateChange: onYtState,
+      onError: onYtError
+    }
+  });
+}
+
+function playYT(id, title, thumbnail) {
+  if (!ytReady || !ytPlayer?.loadVideoById) {
+    showNotif('⏳ YouTube player hazırlanıyor...');
+    setTimeout(() => playYT(id, title, thumbnail), 600);
+    return;
+  }
+
+  clearTimeout(ytWatchdog);
+  renderMediaArtwork(thumbnail, title);
+  aud.pause();
+
+  if (isMob()) {
+    goFull();
+    syncYtSurface('full-slot');
+  } else {
+    showPip(title);
+    syncYtSurface('pip-slot');
+  }
+
+  try {
+    ytPlayer.unMute?.();
+    ytPlayer.setVolume?.(Math.round(vol * 100));
+  } catch (_) {}
+
+  try {
+    ytPlayer.loadVideoById({ videoId: id, startSeconds: 0, suggestedQuality: 'medium' });
+  } catch (_) {
+    tryPlayableFallback();
+    return;
+  }
+
+  const tryStart = () => {
+    try { ytPlayer.playVideo?.(); } catch (_) {}
+  };
+
+  tryStart();
+  setTimeout(tryStart, 250);
+  setTimeout(tryStart, 900);
+  setTimeout(() => {
+    try {
+      const state = ytPlayer.getPlayerState?.();
+      if (state !== YT.PlayerState.PLAYING && state !== YT.PlayerState.BUFFERING) {
+        ytPlayer.mute?.();
+        tryStart();
+        setTimeout(() => {
+          try {
+            ytPlayer.unMute?.();
+            ytPlayer.setVolume?.(Math.round(vol * 100));
+          } catch (_) {}
+        }, 500);
+      }
+    } catch (_) {}
+  }, 1800);
+
+  ytWatchdog = setTimeout(() => {
+    try {
+      const state = ytPlayer?.getPlayerState?.();
+      if (cur?.id === id && state !== YT.PlayerState.PLAYING && state !== YT.PlayerState.BUFFERING) {
+        tryPlayableFallback();
+      }
+    } catch (_) {
+      tryPlayableFallback();
+    }
+  }, 7000);
+
+  playing = true;
+  setPlayIco(true);
+  startArtSpin();
+
+  document.getElementById('fpT').textContent = title;
+  document.getElementById('fpA').textContent = 'Noxipy Pro · YouTube';
+  document.getElementById('mini-ttl').textContent = title;
+  if (thumbnail) document.getElementById('fpBgBlur').style.backgroundImage = `url(${thumbnail})`;
+  syncFpLike();
+  showNotif('▶ ' + title);
+  updateMediaSession();
+}
+
+function openBackendDownload(id, title) {
+  const safe = (title || 'muzik').replace(/[<>:"/\\|?*]/g, '').trim() || 'muzik';
+  const url = `${API}/process?id=${encodeURIComponent(id)}&dl=1`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.rel = 'noopener';
+  if (isIOSDevice()) {
+    a.target = '_blank';
+  } else {
+    a.download = `${safe}.mp3`;
+    a.target = '_self';
+  }
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+async function dlById(id, title) {
+  const btn = document.getElementById('dl-' + id);
+  if (btn) btn.disabled = true;
+  dlCanceled = false;
+  showDl(`⬇ ${title}`, -1);
+
+  try {
+    if (!serverOk) throw new Error('Backend hazır değil. Birkaç saniye sonra tekrar dene.');
+    openBackendDownload(id, title);
+    totalDls++;
+    writeLS('nxDls', String(totalDls));
+    updateStats();
+    showNotif('⬇ MP3 indiriliyor...');
+  } catch (error) {
+    showNotif(`❌ ${error?.message || 'Indirme baslatilamadi.'}`);
+  } finally {
+    if (btn) btn.disabled = false;
+    if (!dlCanceled) setTimeout(hideDl, 1200);
+  }
+}
+
+ensureClipFullscreenButton();
+
 /* ═══════════════════════════════════════════════
    LYRICS
 ═══════════════════════════════════════════════ */
