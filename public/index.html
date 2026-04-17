@@ -967,7 +967,6 @@ let playing = false, shuf = false, rep = 0, vol = 0.8, muteVol = 0.8;
 let serverOk = false, sleepTmr = null;
 let blobUrl = null;
 let ytPlayer = null, ytReady = false, ytInitDone = false;
-let dlCtrl = null;
 let dlCanceled = false;
 let ctxTrack = null;
 let radioActive = false, radioQuery = '';
@@ -1107,7 +1106,7 @@ async function tryPlayableFallback() {
     showNotif('⚠️ Bu video açılamadı, alternatif aranıyor...');
     const query = `${cur.title} audio`;
     const resp = await fetch(`${API}/search?q=${encodeURIComponent(query)}`, {
-      signal: AbortSignal.timeout(15000)
+      signal: timeoutSignal(15000)
     });
     if (!resp.ok) throw new Error('Alternatif sonuç alınamadı');
 
@@ -1237,7 +1236,7 @@ async function checkServer() {
   for (let i = 0; i < MAX; i++) {
     setSrv('warn', i === 0 ? '⏳ Bağlanıyor...' : `⏳ Deneme ${i+1}/${MAX}…`);
     try {
-      const r = await fetch(API+'/ping', { signal: AbortSignal.timeout(12000) });
+      const r = await fetch(API+'/ping', { signal: timeoutSignal(12000) });
       if (r.ok) {
         serverOk = true;
         setSrv('ok','✅ Sunucu Aktif');
@@ -1294,7 +1293,7 @@ async function doSearch(q) {
 
   if (!serverOk) { state.innerHTML = emptyHTML('📡','Sunucu hazır değil','Lütfen bekle...'); document.getElementById('sBtn').disabled=false; return; }
   try {
-    const r = await fetch(`${API}/search?q=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(20000) });
+    const r = await fetch(`${API}/search?q=${encodeURIComponent(query)}`, { signal: timeoutSignal(20000) });
     if (!r.ok) throw new Error('HTTP '+r.status);
     const data = await r.json();
     state.innerHTML = '';
@@ -1317,7 +1316,7 @@ async function loadHome() {
   const el = document.getElementById('home-res');
   el.innerHTML = '<div class="spin"></div>';
   try {
-    const r = await fetch(`${API}/search?q=m%C3%BCzik+2024`, { signal: AbortSignal.timeout(16000) });
+    const r = await fetch(`${API}/search?q=m%C3%BCzik+2024`, { signal: timeoutSignal(16000) });
     const d = await r.json();
     el.innerHTML = d.slice(0,10).map((v,i) => rrHTML(v,i)).join('');
     animateRows(el);
@@ -1363,7 +1362,7 @@ async function startRadio(id, name, query) {
   const el = document.getElementById('radio-list');
   el.innerHTML = '<div class="spin"></div>';
   try {
-    const r = await fetch(`${API}/search?q=${encodeURIComponent(radioQuery)}`, { signal: AbortSignal.timeout(20000) });
+    const r = await fetch(`${API}/search?q=${encodeURIComponent(radioQuery)}`, { signal: timeoutSignal(20000) });
     const data = await r.json();
     el.innerHTML = data.map((v,i) => rrHTML(v,i)).join('');
     animateRows(el);
@@ -1905,7 +1904,7 @@ async function loadMoreRadio() {
   if (!serverOk || !cur) return;
   try {
     const q = cur.title.split(' ').slice(0,3).join(' ') + ' similar music';
-    const r = await fetch(`${API}/search?q=${encodeURIComponent(q)}`, { signal: AbortSignal.timeout(15000) });
+    const r = await fetch(`${API}/search?q=${encodeURIComponent(q)}`, { signal: timeoutSignal(15000) });
     const data = await r.json();
     const newTracks = data.filter(v => !queue.find(s=>s.id===v.id));
     if (newTracks.length) {
@@ -2113,87 +2112,42 @@ function clearHist() { histList=[]; localStorage.removeItem('nxHist'); renderHis
 /* ═══════════════════════════════════════════════
    DOWNLOAD
 ═══════════════════════════════════════════════ */
-async function dlById(id, title) {
-  const btn = document.getElementById('dl-'+id);
-  if (btn) btn.disabled=true;
-  dlCtrl = new AbortController();
+function dlById(id, title) {
+  const btn = document.getElementById('dl-' + id);
+  if (btn) btn.disabled = true;
   dlCanceled = false;
   showDl(`⬇ ${title}`, -1);
-  showNotif('⬇ İndirme hazırlanıyor...');
+  showNotif('⬇ MP3 indirme baslatiliyor...');
 
-  const backendState = await tryBackendDl(id, title);
-  if (backendState === 'aborted') {
-    hideDl();
-  } else if (!backendState) {
-    hideDl();
-    showNotif('⬇ Direkt indirme açılıyor...');
-    openBackendDownload(id);
-  }
-
-  dlCtrl = null;
-  if (btn) btn.disabled = false;
-}
-
-async function tryBackendDl(id, title) {
-  if (!serverOk) return false;
-  let connectTimer = null;
-  let didTimeOut = false;
   try {
-    connectTimer = setTimeout(() => {
-      didTimeOut = true;
-      dlCtrl?.abort();
-    }, 15000);
-
-    const resp = await fetch(`${API}/process?id=${id}`, {
-      headers: {'Accept':'audio/mpeg,audio/*,*/*'},
-      signal: dlCtrl.signal
-    });
-    clearTimeout(connectTimer);
-    if (!resp.ok) return false;
-    const contentType = resp.headers.get('Content-Type')||'';
-    if (!contentType.includes('audio') && !contentType.includes('octet')) return false;
-    const reader = resp.body.getReader();
-    const total  = +resp.headers.get('Content-Length')||0;
-    let received=0; const chunks=[];
-    while (true) {
-      const {done,value} = await reader.read();
-      if (done) break;
-      chunks.push(value); received+=value.length;
-      showDl(`⬇ ${title}`, total ? Math.round(received/total*100) : -1);
-    }
-    if (!chunks.length) return false;
-    saveDlBlob(chunks, title, 'audio/mpeg');
-    hideDl(); showNotif('✅ İndirildi: '+title);
-    totalDls++; localStorage.setItem('nxDls',totalDls); updateStats();
-    return true;
-  } catch(e) {
-    clearTimeout(connectTimer);
-    if (dlCanceled) return 'aborted';
-    if (didTimeOut) return false;
-    return false;
+    openBackendDownload(id, title);
+    totalDls++;
+    localStorage.setItem('nxDls', totalDls);
+    updateStats();
+    setTimeout(() => {
+      if (!dlCanceled) {
+        hideDl();
+      }
+    }, 1000);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
-function openBackendDownload(id) {
+function openBackendDownload(id, title) {
+  const safe = (title || 'muzik').replace(/[<>:"/\\|?*]/g, '').trim() || 'muzik';
   const a = Object.assign(document.createElement('a'), {
-    href: `${API}/process?id=${encodeURIComponent(id)}`,
-    rel: 'noopener'
+    href: `${API}/process?id=${encodeURIComponent(id)}&dl=1`,
+    rel: 'noopener',
+    target: '_blank',
+    download: `${safe}.mp3`
   });
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
 }
 
-function saveDlBlob(chunks, title, mime) {
-  const blob = new Blob(chunks, {type: mime});
-  const url  = URL.createObjectURL(blob);
-  const safe = (title||'muzik').replace(/[<>:"/\\|?*]/g,'').trim() || 'muzik';
-  const a = Object.assign(document.createElement('a'), {href:url, download: safe+'.mp3'});
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  setTimeout(()=>URL.revokeObjectURL(url), 8000);
-}
-
-function cancelDl() { dlCanceled = true; dlCtrl?.abort(); hideDl(); showNotif('⛔ İndirme iptal edildi'); }
+function cancelDl() { dlCanceled = true; hideDl(); showNotif('⛔ Indirme penceresi kapatildi'); }
 function dlCur() { if(!cur){showNotif('⚠️ Önce şarkı seç');return;} dlById(cur.id,cur.title); }
 function showDl(txt,pct) {
   document.getElementById('dl-wrap').classList.add('v');
@@ -2388,6 +2342,15 @@ function clearCache() {
 function fmt(s){const t=Math.floor(s||0);return`${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`;}
 function esc(s){return(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
 
+function timeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(ms);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
+
 /* ═══════════════════════════════════════════════
    AUTOCOMPLETE
 ═══════════════════════════════════════════════ */
@@ -2518,23 +2481,17 @@ async function toggleLyrics() {
   panel.style.display = lyricsShown ? 'flex' : 'none';
   if (lyricsShown && cur) {
     const content = document.getElementById('lyrics-content');
-    content.innerHTML = '<div class="spin" style="margin:40px auto;"></div>Sözler aranıyor...';
+    content.innerHTML = '<div class="spin" style="margin:40px auto;"></div>Sozler araniyor...';
     try {
       const q = encodeURIComponent(cur.title);
-      const r = await fetch(`https://api.lyrics.ovh/v1/${q.replace(/ - /,'/')}`);
+      const r = await fetch(`${API}/lyrics?q=${q}`, { signal: timeoutSignal(15000) });
+      if (!r.ok) throw new Error('Soz bulunamadi');
       const data = await r.json();
-      if (data.lyrics) {
-        content.innerHTML = data.lyrics.replace(/\n/g, '<br>');
-      } else {
-        // Fallback or secondary API
-        const r2 = await fetch(`${API}/lyrics?q=${q}`);
-        const d2 = await r2.json();
-        content.innerHTML = d2.lyrics ? d2.lyrics.replace(/\n/g, '<br>') : 'Sözler bulunamadı.';
-      }
+      content.innerHTML = data.lyrics ? data.lyrics.replace(/\n/g, '<br>') : 'Sozler bulunamadi.';
     } catch(e) {
-      content.innerHTML = 'Sözler yüklenirken bir hata oluştu.';
+      content.innerHTML = 'Sozler yuklenirken bir hata olustu.';
     }
-  }
+}
 }
 
 /* ═══════════════════════════════════════════════
@@ -2645,3 +2602,4 @@ if ('serviceWorker' in navigator) {
 
 </body>
 </html>
+

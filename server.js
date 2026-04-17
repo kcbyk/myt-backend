@@ -53,8 +53,28 @@ app.get('/search', async (req, res) => {
   }
 });
 
+app.get('/lyrics', async (req, res) => {
+  try {
+    const rawQuery = String(req.query.q || '').trim();
+    if (!rawQuery) {
+      return res.status(400).json({ error: 'Lutfen bir sarki ismi girin.' });
+    }
+
+    const lyrics = await resolveLyrics(rawQuery);
+    if (!lyrics) {
+      return res.status(404).json({ error: 'Sarki sozu bulunamadi.' });
+    }
+
+    res.json({ lyrics });
+  } catch (error) {
+    console.error('Soz arama hatasi:', error);
+    res.status(500).json({ error: 'Sozler alinirken bir hata olustu.' });
+  }
+});
+
 app.get('/process', async (req, res) => {
   const videoId = String(req.query.id || '').trim();
+  const forceDownload = req.query.dl === '1' || req.query.download === '1';
   if (!isValidVideoId(videoId)) {
     return res.status(400).json({ error: 'Gecerli bir video ID gerekli.' });
   }
@@ -74,9 +94,10 @@ app.get('/process', async (req, res) => {
     const { title, mediaUrl } = await getAudioSource(videoId);
     const fileName = sanitizeFileName(title);
 
-    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Type', forceDownload ? 'application/octet-stream' : 'audio/mpeg');
     res.setHeader('Content-Disposition', buildContentDisposition(fileName));
     res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
 
     ffmpegProcess = spawn(
       ffmpegPath,
@@ -155,6 +176,120 @@ function buildContentDisposition(fileName) {
   const asciiFallback = (fileName.replace(/[^\x20-\x7E]/g, '').replace(/["\\]/g, '').trim() || 'muzik') + '.mp3';
   const utfName = `${encodeURIComponent(fileName)}.mp3`;
   return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${utfName}`;
+}
+
+function normalizeLyricsQuery(value) {
+  return String(value || '')
+    .replace(/\([^)]*(official|lyrics?|video|audio|hd|4k|live|clip)[^)]*\)/gi, ' ')
+    .replace(/\[[^\]]*(official|lyrics?|video|audio|hd|4k|live|clip)[^\]]*\]/gi, ' ')
+    .replace(/\b(official|lyrics?|video|audio|hd|4k|live|clip|music video)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function splitArtistAndTitle(query) {
+  const cleaned = normalizeLyricsQuery(query);
+  const parts = cleaned.split(/\s[-–—|]\s/).map((part) => part.trim()).filter(Boolean);
+
+  if (parts.length >= 2) {
+    return {
+      artist: parts[0],
+      title: parts.slice(1).join(' - '),
+      cleaned,
+    };
+  }
+
+  return { artist: '', title: cleaned, cleaned };
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs, headers = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers,
+      signal: controller.signal,
+      redirect: 'follow',
+    });
+    if (!response.ok) {
+      return null;
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function pickLrcLibLyrics(item) {
+  if (!item || typeof item !== 'object') {
+    return '';
+  }
+  const lyrics = String(item.plainLyrics || item.syncedLyrics || '').trim();
+  return lyrics;
+}
+
+async function findLyricsFromLrcLib(title, artist) {
+  const params = new URLSearchParams();
+  params.set('track_name', title);
+  if (artist) {
+    params.set('artist_name', artist);
+  }
+
+  const data = await fetchJsonWithTimeout(`https://lrclib.net/api/search?${params.toString()}`, 12000, {
+    'User-Agent': 'Mozilla/5.0',
+  });
+
+  if (!Array.isArray(data)) {
+    return '';
+  }
+
+  for (const item of data) {
+    const lyrics = pickLrcLibLyrics(item);
+    if (lyrics) {
+      return lyrics;
+    }
+  }
+  return '';
+}
+
+async function findLyricsFromLyricsOvh(artist, title) {
+  if (!artist || !title) {
+    return '';
+  }
+  const url = `https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`;
+  const data = await fetchJsonWithTimeout(url, 12000, { 'User-Agent': 'Mozilla/5.0' });
+  const lyrics = String(data && data.lyrics ? data.lyrics : '').trim();
+  return lyrics;
+}
+
+async function resolveLyrics(query) {
+  const { artist, title, cleaned } = splitArtistAndTitle(query);
+  if (!title) {
+    return '';
+  }
+
+  const attempts = [];
+  attempts.push({ title, artist });
+  if (cleaned && cleaned !== title) {
+    attempts.push({ title: cleaned, artist: '' });
+  }
+  if (!artist) {
+    attempts.push({ title, artist: '' });
+  }
+
+  for (const attempt of attempts) {
+    const fromLrcLib = await findLyricsFromLrcLib(attempt.title, attempt.artist);
+    if (fromLrcLib) {
+      return fromLrcLib;
+    }
+  }
+
+  const fromLyricsOvh = await findLyricsFromLyricsOvh(artist, title);
+  if (fromLyricsOvh) {
+    return fromLyricsOvh;
+  }
+
+  return '';
 }
 
 async function ensureYtDlpBinary() {

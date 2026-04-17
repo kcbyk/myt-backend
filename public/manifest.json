@@ -1,0 +1,11 @@
+{
+  "name": "Noxipy Pro",
+  "short_name": "Noxipy",
+  "description": "YouTube'dan muzik ara, dinle ve MP3 indir.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#060610",
+  "theme_color": "#060610",
+  "icons": []
+}
