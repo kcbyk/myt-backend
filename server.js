@@ -498,7 +498,7 @@ async function getInvidiousAudioSource(videoId) {
         }
 
         if (!response.ok) {
-          if (loggedAttempts < 8) {
+          if (loggedAttempts < 60) {
             console.warn(`Invidious deneme basarisiz (${origin}): HTTP ${response.status}`);
             loggedAttempts += 1;
           }
@@ -508,7 +508,7 @@ async function getInvidiousAudioSource(videoId) {
         const data = await response.json();
 
         if (!data || !Array.isArray(data.adaptiveFormats)) {
-          if (loggedAttempts < 8) {
+          if (loggedAttempts < 60) {
             console.warn(`Invidious deneme basarisiz (${origin}): adaptiveFormats yok`);
             loggedAttempts += 1;
           }
@@ -517,7 +517,7 @@ async function getInvidiousAudioSource(videoId) {
 
         const format = pickBestInvidiousAudioFormat(data.adaptiveFormats);
         if (!format || format.itag == null) {
-          if (loggedAttempts < 8) {
+          if (loggedAttempts < 60) {
             console.warn(`Invidious deneme basarisiz (${origin}): ses formati yok`);
             loggedAttempts += 1;
           }
@@ -529,7 +529,7 @@ async function getInvidiousAudioSource(videoId) {
           mediaUrl: `${origin}/latest_version?id=${encodeURIComponent(videoId)}&itag=${encodeURIComponent(String(format.itag))}&local=true`,
         };
       } catch (error) {
-        if (loggedAttempts < 8) {
+        if (loggedAttempts < 60) {
           const message = error && error.message ? error.message : String(error);
           console.warn(`Invidious deneme hatasi (${scheme}://${instance}): ${message}`);
           loggedAttempts += 1;
