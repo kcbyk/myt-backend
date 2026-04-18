@@ -2790,6 +2790,8 @@ function isIOSDevice() {
   return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }
+let playbackMode = 'youtube';
+let fallbackAttemptKey = '';
 
 function ensureClipFullscreenButton() {
   const hdr = document.querySelector('.fp-hdr');
@@ -2864,6 +2866,7 @@ function onYouTubeIframeAPIReady() {
     events: {
       onReady(event) {
         ytReady = true;
+        playbackMode = 'youtube';
         try {
           event.target.unMute?.();
           event.target.setVolume(Math.round(vol * 100));
@@ -2892,7 +2895,10 @@ function playYT(id, title, thumbnail) {
 
   clearTimeout(ytWatchdog);
   renderMediaArtwork(thumbnail, title);
+  playbackMode = 'youtube';
+  fallbackAttemptKey = '';
   aud.pause();
+  try { aud.removeAttribute('src'); aud.load(); } catch (_) {}
 
   if (isMob()) {
     goFull();
@@ -2941,10 +2947,10 @@ function playYT(id, title, thumbnail) {
     try {
       const state = ytPlayer?.getPlayerState?.();
       if (cur?.id === id && state !== YT.PlayerState.PLAYING && state !== YT.PlayerState.BUFFERING) {
-        tryPlayableFallback();
+        startAudioFallback(id, title, thumbnail);
       }
     } catch (_) {
-      tryPlayableFallback();
+      startAudioFallback(id, title, thumbnail);
     }
   }, 7000);
 
@@ -2977,6 +2983,131 @@ function openBackendDownload(id, title) {
   a.click();
   document.body.removeChild(a);
 }
+
+function startAudioFallback(id, title, thumbnail) {
+  const key = `${id}:${title || ''}`;
+  if (fallbackAttemptKey === key) return;
+  fallbackAttemptKey = key;
+  playbackMode = 'audio';
+  clearTimeout(ytWatchdog);
+
+  try { ytPlayer?.pauseVideo?.(); } catch (_) {}
+  renderMediaArtwork(thumbnail, title);
+
+  const streamUrl = `${API}/process?id=${encodeURIComponent(id)}&stream=1&t=${Date.now()}`;
+  aud.src = streamUrl;
+  aud.load();
+
+  const p = aud.play();
+  if (p && typeof p.then === 'function') {
+    p.then(() => {
+      playing = true;
+      setPlayIco(true);
+      startArtSpin();
+      document.getElementById('fpT').textContent = title;
+      document.getElementById('fpA').textContent = 'Noxipy Pro · Audio Fallback';
+      document.getElementById('mini-ttl').textContent = title;
+      if (thumbnail) document.getElementById('fpBgBlur').style.backgroundImage = `url(${thumbnail})`;
+      showNotif('🎧 Video yerine ses modunda çalıyor');
+      updateMediaSession();
+    }).catch(() => {
+      playbackMode = 'youtube';
+      tryPlayableFallback();
+    });
+  }
+}
+
+function onYtError(e) {
+  const code = Number(e?.data);
+  clearTimeout(ytWatchdog);
+  console.warn('YouTube player error:', code, cur?.id);
+  playing = false;
+  setPlayIco(false);
+  showEq(false);
+  stopArtSpin();
+  updateMediaSession();
+
+  if (cur?.id) {
+    startAudioFallback(cur.id, cur.title, cur.thumbnail);
+    return;
+  }
+  showNotif(`❌ Oynatma hatası (${code || 'bilinmiyor'})`);
+}
+
+function onYtState(e) {
+  const S = YT.PlayerState;
+  if (e.data === S.PLAYING) {
+    playbackMode = 'youtube';
+    clearTimeout(ytWatchdog);
+    fallbackBusy = false;
+    syncYtSurface();
+    playing = true; setPlayIco(true); showEq(true); startArtSpin();
+    try { startEq(); } catch (_) {}
+    document.querySelectorAll('.rr').forEach(el => el.classList.remove('playing'));
+    if (cur?.id) document.querySelectorAll(`[id="rr-${cur.id}"]`).forEach(el => el.classList.add('playing'));
+  }
+  if (e.data === S.PAUSED) { playing = false; setPlayIco(false); showEq(false); stopArtSpin(); }
+  if (e.data === S.ENDED) { playing = false; setPlayIco(false); showEq(false); stopArtSpin(); handleEnd(); }
+  if (e.data === S.BUFFERING) showNotif('⏳ Yükleniyor...');
+  updateMediaSession();
+}
+
+function setVol(v) {
+  vol = Math.max(0, Math.min(1, Number(v) || 0));
+  try {
+    if (ytPlayer?.setVolume) ytPlayer.setVolume(Math.round(vol * 100));
+    if (vol <= 0) ytPlayer?.mute?.();
+    else ytPlayer?.unMute?.();
+  } catch (_) {}
+  aud.volume = vol;
+  const w = (vol * 100) + '%';
+  const vb = document.getElementById('vF');
+  const fvb = document.getElementById('fpVfill');
+  if (vb) vb.style.width = w;
+  if (fvb) fvb.style.width = w;
+}
+
+function togglePlay() {
+  if (!cur) { showNotif('⚠️ Önce şarkı seç'); return; }
+  if (playbackMode === 'audio') {
+    if (aud.paused) {
+      aud.play().then(() => { playing = true; setPlayIco(true); startArtSpin(); }).catch(() => showNotif('❌ Oynatma başlatılamadı'));
+    } else {
+      aud.pause();
+      playing = false;
+      setPlayIco(false);
+      stopArtSpin();
+    }
+    return;
+  }
+  if (ytPlayer?.pauseVideo) {
+    if (playing) { ytPlayer.pauseVideo(); playing=false; setPlayIco(false); stopArtSpin(); }
+    else         { ytPlayer.playVideo();  playing=true;  setPlayIco(true);  startArtSpin(); }
+  }
+}
+
+aud.addEventListener('timeupdate', () => {
+  if (playbackMode !== 'audio' || !aud.duration) return;
+  const pct = (aud.currentTime / aud.duration * 100).toFixed(1) + '%';
+  document.getElementById('pF').style.width = pct;
+  document.getElementById('cT').textContent = fmt(aud.currentTime);
+  document.getElementById('tT').textContent = fmt(aud.duration);
+  const fpFill = document.getElementById('fpFill');
+  const fpCT = document.getElementById('fpCT');
+  const fpTT = document.getElementById('fpTT');
+  if (fpFill) fpFill.style.width = pct;
+  if (fpCT) fpCT.textContent = fmt(aud.currentTime);
+  if (fpTT) fpTT.textContent = fmt(aud.duration);
+});
+
+aud.addEventListener('error', () => {
+  if (playbackMode !== 'audio') return;
+  playbackMode = 'youtube';
+  if (cur?.id) {
+    showNotif('⚠️ Ses fallback başarısız, alternatif deneniyor...');
+    tryPlayableFallback();
+  }
+});
 
 async function dlById(id, title) {
   const btn = document.getElementById('dl-' + id);

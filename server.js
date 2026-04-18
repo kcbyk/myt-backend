@@ -142,7 +142,7 @@ app.get('/process', async (req, res) => {
 
       streamStarted = true;
       res.setHeader('Content-Type', forceDownload ? 'application/octet-stream' : 'audio/mpeg');
-      res.setHeader('Content-Disposition', buildContentDisposition(fileName));
+      res.setHeader('Content-Disposition', buildContentDisposition(fileName, forceDownload));
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Content-Type-Options', 'nosniff');
     };
@@ -222,10 +222,11 @@ function sanitizeFileName(value) {
   );
 }
 
-function buildContentDisposition(fileName) {
+function buildContentDisposition(fileName, asAttachment = true) {
+  const dispositionType = asAttachment ? 'attachment' : 'inline';
   const asciiFallback = (fileName.replace(/[^\x20-\x7E]/g, '').replace(/["\\]/g, '').trim() || 'muzik') + '.mp3';
   const utfName = `${encodeURIComponent(fileName)}.mp3`;
-  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${utfName}`;
+  return `${dispositionType}; filename="${asciiFallback}"; filename*=UTF-8''${utfName}`;
 }
 
 function normalizeLyricsQuery(value) {
